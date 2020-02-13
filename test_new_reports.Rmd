@@ -71,11 +71,17 @@ df1 <- df %>%
   mutate_if(~any(is.numeric(.)), ~prettyNum(., big.mark = ","))
 
 #Get Hourly trend
-query_hist_orcl <- "select module, transdate, to_char(last_update, 'HH24') hourly, sum(bundle_price) total from cdr where transdate >= trunc(sysdate-1) and status_reason = 'BUNDLE_SUCCESS' group by module, transdate, to_char(last_update, 'HH24')"
+query_hist_orcl <- "select module, transdate, to_char(last_update, 'HH24') hourly, sum(bundle_price) total from cdr where transdate >= trunc(sysdate-1) and status_reason = 'BUNDLE_SUCCESS' group by module, transdate, to_char(last_update, 'HH24') 
+UNION ALL
+select module, transdate, to_char(last_update, 'HH24') hourly, sum(bundle_price) total from cdr where transdate = trunc(sysdate-7) and status_reason = 'BUNDLE_SUCCESS' group by module, transdate, to_char(last_update, 'HH24')
+order by 1, 2, 3"
 
 
 query_hist_mysql39 <- "SELECT MODULE, TRANSDATE, HOUR(LAST_UPDATE) HOURLY, SUM(BUNDLE_PRICE) TOTAL FROM CDR WHERE TRANSDATE >= CURDATE()-1 AND STATUS_REASON = 'BUNDLE_SUCCESS' AND MODULE LIKE '%WAUU%'
-GROUP BY MODULE, TRANSDATE, HOUR(LAST_UPDATE)"
+GROUP BY MODULE, TRANSDATE, HOUR(LAST_UPDATE)
+UNION ALL
+SELECT MODULE, TRANSDATE, HOUR(LAST_UPDATE) HOURLY, SUM(BUNDLE_PRICE) TOTAL FROM CDR WHERE TRANSDATE = CURDATE()-7 AND STATUS_REASON = 'BUNDLE_SUCCESS' AND MODULE LIKE '%WAUU%'
+GROUP BY MODULE, TRANSDATE, HOUR(LAST_UPDATE) ORDER BY 1, 2, 3"
 
 rs39_1 <- dbSendQuery(myDB39, query_hist_mysql39)
 data_hist_m39 <- fetch(rs39_1, n=-1)

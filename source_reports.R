@@ -1,6 +1,7 @@
 library(dplyr)
 library(RMySQL)
 library(RJDBC)
+library(ggplot2)
 
 #sQL for MySQL
 query_mysql <- "SELECT CASE A.MODULE WHEN 'BUNDLES3G' then 'BUNDLES3G_EVD_123' ELSE A.MODULE END MODULE, B.TOTAL YESTERDAY, A.TOTAL TODAY, (A.TOTAL - B.TOTAL) DIFFERENCE, ROUND(A.TOTAL*100/(B.TOTAL), 1) PCT 
@@ -35,11 +36,16 @@ orcl <- dbConnect(drv, "jdbc:oracle:thin:@//10.100.2.179:1521/vasdb", "vas", "va
 dataOrcl <- dbGetQuery(orcl, query_orcl)
 
 #bind dataframes
-sdf <- rbind(data39, data15, dataOrcl)
-rm(data39, data15, dataOrcl)
+#Get Hourly trend
+query_hist_orcl <- "select module, transdate, to_char(last_update, 'HH24') hourly, sum(bundle_price) total from cdr where transdate >= trunc(sysdate-1)
+and status_reason = 'BUNDLE_SUCCESS'
+group by module, transdate, to_char(last_update, 'HH24')
+order by 1, 2, 3"
 
-#Mutate final sdf and add datetime
-sdf <- sdf %>% mutate("Current DateTime" = format(Sys.time(), "%a %b %d %X %Y"))
+data_hist_orcl <- dbGetQuery(orcl, query_hist_orcl)
+data_hist_orcl$TRANSDATE <- as.character(as.Date(data_hist_orcl$TRANSDATE))
+df_bombastico <- data_hist_orcl %>% filter(MODULE=='BOMBASTICO')
+ggplot(df_bombastico, aes(x=HOURLY, y=TOTAL, group=TRANSDATE))+geom_line(aes(color=TRANSDATE)) + geom_point(aes(color=TRANSDATE))
 
 
 #Clear resultset and close connections
