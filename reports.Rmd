@@ -68,7 +68,8 @@ df1 <- df %>%
   #select() %>% 
   #filter(MODULE != c('ECOMIB', 'SMSBUNDLE')) %>% 
   arrange(desc(TODAY)) %>%
-  mutate_if(~any(is.numeric(.)), ~prettyNum(., big.mark = ","))
+  mutate_if(~any(is.numeric(.)), ~prettyNum(., big.mark = ",")) %>%
+  rename("Prior W."= SDLW, DoD=Y_T_DIFF, "DoD%"=PCT_Y_T, "Vs Prior W."= PCT_SDLW)
 
 #Get Hourly trend
 query_hist_orcl <- "select module, transdate, to_char(last_update, 'HH24') hourly, sum(bundle_price) total from cdr where transdate >= trunc(sysdate-1) and status_reason = 'BUNDLE_SUCCESS' group by module, transdate, to_char(last_update, 'HH24')"
