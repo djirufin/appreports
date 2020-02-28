@@ -9,15 +9,21 @@ output: html_document
 knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE, results = 'hide')
 ```
 
-```{r}
+```{r loading_lib}
 library(dplyr)
+library(tidyr)
 library(RMySQL)
 library(RJDBC)
 library(knitr)
 library(ggplot2)
+library(kableExtra)
+library(mongolite)
+library(lubridate)
+
+Sys.setenv(TZ='GMT')
 ```
 
-```{r}
+```{r runqueries}
 
 #sQL for MySQL
 query_mysql <- "SELECT CASE A.MODULE WHEN 'BUNDLES3G' then 'BUNDLES3G_EVD_123' ELSE A.MODULE END MODULE, C.TOTAL SDLW, B.TOTAL YESTERDAY, A.TOTAL TODAY, (A.TOTAL - B.TOTAL) Y_T_DIFF, CONCAT(ROUND(A.TOTAL*100/(B.TOTAL), 1)-100, '%') PCT_Y_T, (A.TOTAL - C.TOTAL) DIFF_SDLW, CONCAT(ROUND(A.TOTAL*100/(C.TOTAL), 1)-100, '%') PCT_SDLW
@@ -44,23 +50,50 @@ GROUP BY MODULE) C USING (MODULE)
 ORDER BY TODAY DESC"
 
 #Connection to server 39
-myDB39 <- dbConnect(MySQL(), user='everaldo', password='123456', dbname='COMMON', host='192.168.100.39')
+myDB39 <- dbConnect(MySQL(), user='********', password='*******', dbname='******', host='********')
 rs39 <- dbSendQuery(myDB39, query_mysql)
 data39 <- fetch(rs39, n=-1)
 
 
 #Connection to server 15
-myDB15 <- dbConnect(MySQL(), user='mtn', password='Mtn@123456', dbname='COMMON', host='192.168.100.15')
+myDB15 <- dbConnect(MySQL(), user='*******', password='*********', dbname='********', host='********')
 rs15 <- dbSendQuery(myDB15, query_mysql)
 data15 <- fetch(rs15, n=-1)
 
 #Connection to oracle server
 drv <- JDBC("oracle.jdbc.OracleDriver", classPath = "lib/ojdbc6.jar")
-orcl <- dbConnect(drv, "jdbc:oracle:thin:@//10.100.2.179:1521/vasdb", "vas", "vas")
+orcl <- dbConnect(drv, "jdbc:oracle:thin:@//*********", "******", "********")
 dataOrcl <- dbGetQuery(orcl, query_orcl)
 
+
+
+#Connection to mongodb
+cnx_mongo <- mongo(collection = "cdrs", db="vasapps", url = "*********")
+prior_w <- as.character(Sys.Date()-7)
+yesterd <- as.character(Sys.Date() - 1)
+today <- as.character(Sys.Date())
+
+build_mgo <- paste0('{"transdate":{"$in":["', prior_w, '", "',yesterd, '","', today, '"]}, "bundlestatus":"BUNDLE_SUCCESS", "module":"MTNGRATIS"}')
+
+df_zs <- cnx_mongo$find(query = build_mgo, fields = '{"_id":0, "transdate":1, "module":1, "finalpaymentchoice":1, "bundleprice":1, "lastupdate":1}')
+
+#current time
+
+df_zerostress <- df_zs %>% mutate(lastupdate=ymd_hms(lastupdate), bundleprice=as.numeric(bundleprice),  HOURLY=format(ymd_hms(lastupdate), "%H"), HMS=format(ymd_hms(lastupdate), "%H:%M:%S")) 
+n <- format(now(tzone = "Africa/Bissau"), "%H:%M:%S")
+df_zerostress <- df_zerostress %>% filter(HMS <= n) %>% 
+  group_by(transdate) %>% 
+  summarise(total=sum(bundleprice)) %>% 
+  spread(transdate, total) %>%
+  rename(SDLW = prior_w, YESTERDAY= yesterd, TODAY=today) %>%
+  mutate(MODULE='ZEROSTRESS', Y_T_DIFF=TODAY-YESTERDAY, PCT_Y_T=paste0(round(TODAY*100/YESTERDAY, 1)-100, '%'), DIFF_SDLW = TODAY-SDLW, PCT_SDLW=paste0(round(TODAY*100/SDLW, 1)-100, '%')) %>%
+  select(MODULE, SDLW, YESTERDAY, TODAY, Y_T_DIFF, PCT_Y_T, DIFF_SDLW, PCT_SDLW)
+
+
+
+
 #bind dataframes
-df <- rbind(data39, data15, dataOrcl)
+df <- rbind(data39, data15, dataOrcl, df_zerostress)
 rm(data39, data15, dataOrcl)
 
 #Mutate final sdf and add datetime
@@ -69,14 +102,21 @@ df1 <- df %>%
   #filter(MODULE != c('ECOMIB', 'SMSBUNDLE')) %>% 
   arrange(desc(TODAY)) %>%
   mutate_if(~any(is.numeric(.)), ~prettyNum(., big.mark = ",")) %>%
-  rename("Prior W."= SDLW, DoD=Y_T_DIFF, "DoD%"=PCT_Y_T, "Vs Prior W."= PCT_SDLW)
+  rename("Prior W."= SDLW, DoD=Y_T_DIFF, "DoD%"=PCT_Y_T, "Vs Prior W."=DIFF_SDLW, "Vs Prior W.%"= PCT_SDLW, "YEST."=YESTERDAY, "TOD."=TODAY)
 
 #Get Hourly trend
-query_hist_orcl <- "select module, transdate, to_char(last_update, 'HH24') hourly, sum(bundle_price) total from cdr where transdate >= trunc(sysdate-1) and status_reason = 'BUNDLE_SUCCESS' group by module, transdate, to_char(last_update, 'HH24')"
+query_hist_orcl <- "select module, transdate, to_char(last_update, 'HH24') hourly, sum(bundle_price) total from cdr where transdate = trunc(sysdate-7) and status_reason = 'BUNDLE_SUCCESS' group by module, transdate, to_char(last_update, 'HH24')
+union all
+select module, transdate, to_char(last_update, 'HH24') hourly, sum(bundle_price) total from cdr where transdate = trunc(sysdate) and status_reason = 'BUNDLE_SUCCESS' group by module, transdate, to_char(last_update, 'HH24')
+"
 
 
-query_hist_mysql39 <- "SELECT MODULE, TRANSDATE, HOUR(LAST_UPDATE) HOURLY, SUM(BUNDLE_PRICE) TOTAL FROM CDR WHERE TRANSDATE >= CURDATE()-1 AND STATUS_REASON = 'BUNDLE_SUCCESS' AND MODULE LIKE '%WAUU%'
-GROUP BY MODULE, TRANSDATE, HOUR(LAST_UPDATE)"
+query_hist_mysql39 <- "SELECT MODULE, TRANSDATE, DATE_FORMAT(LAST_UPDATE, '%H') HOURLY, SUM(BUNDLE_PRICE) TOTAL FROM CDR WHERE TRANSDATE = CURDATE()-7 AND STATUS_REASON = 'BUNDLE_SUCCESS' AND MODULE LIKE '%WAUU%'
+GROUP BY MODULE, TRANSDATE, HOUR(LAST_UPDATE)
+union all
+SELECT MODULE, TRANSDATE, DATE_FORMAT(LAST_UPDATE, '%H') HOURLY, SUM(BUNDLE_PRICE) TOTAL FROM CDR WHERE TRANSDATE = CURDATE() AND STATUS_REASON = 'BUNDLE_SUCCESS' AND MODULE LIKE '%WAUU%'
+GROUP BY MODULE, TRANSDATE, HOUR(LAST_UPDATE)
+"
 
 rs39_1 <- dbSendQuery(myDB39, query_hist_mysql39)
 data_hist_m39 <- fetch(rs39_1, n=-1)
@@ -91,17 +131,7 @@ data_hist_orcl$TRANSDATE <- as.character(as.Date(data_hist_orcl$TRANSDATE))
 
 #### Application Reports summary `r format(Sys.time(), "%a %b %d/%Y %X ", tz="Africa/Bissau")`
 
-`r kable(df1)`
-
-#### Labels definition
-- **SDLW** = Total revenue same hour for Last week same day
-- **YESTERDAY** = Total revenue same hour for yesterday
-- **TODAY** = Total revenue today up this time
-- **Y_T_DIFF** = Difference of total revenue between yesterday and today
-- **PCT_Y_T** = Percentage of total revenue between yesterday and today
-- **DIFF_SDLW** = Difference of total revenue between same day last week and today
-- **PCT_SDLW** = Percentage of total revenue between same day last week and today
-
+`r df1 %>% kable() %>% kable_styling(bootstrap_options = c("striped", "hover", "condensed", "responsive")) `
 
 
 ---
@@ -109,7 +139,7 @@ data_hist_orcl$TRANSDATE <- as.character(as.Date(data_hist_orcl$TRANSDATE))
 - *Total Yesterday* **`r prettyNum(sum(df$YESTERDAY, na.rm=T), big.mark = ",")`**
 - *Total Today* **`r prettyNum(sum(df$TODAY, na.rm=T), big.mark = ",")`**
 - *Total Difference Yest 2 Today* **`r prettyNum(sum(df$TODAY, na.rm=T) - sum(df$YESTERDAY, na.rm=T), big.mark = ",")`**
-- *Total Difference SDLW 2 Today* **`r prettyNum(sum(df$TODAY, na.rm=T) - sum(df$SDLW, na.rm=T), big.mark = ",")`**
+- *Total Difference Prior W. 2 Today* **`r prettyNum(sum(df$TODAY, na.rm=T) - sum(df$SDLW, na.rm=T), big.mark = ",")`**
 
 ---
 
@@ -117,33 +147,41 @@ data_hist_orcl$TRANSDATE <- as.character(as.Date(data_hist_orcl$TRANSDATE))
 
 #### Applicaton reports chart per bundle
 
-```{r}
+```{r databundle_chart}
 df_data <- data_hist_orcl %>% filter(MODULE=='BUNDLES3G')
 ggplot(df_data, aes(x=HOURLY, y=TOTAL, group=TRANSDATE))+geom_line(aes(color=TRANSDATE)) + geom_point(aes(color=TRANSDATE))+ scale_y_continuous(labels = function(x) format(x, scientific = FALSE))+ggtitle("DataBundle trend")
 ```
 
 
-```{r}
+```{r wauuchart}
 df_wauu <- data_hist_m39 %>% filter(MODULE=='WAUU')
 ggplot(df_wauu, aes(x=HOURLY, y=TOTAL, group=TRANSDATE))+geom_line(aes(color=TRANSDATE)) + geom_point(aes(color=TRANSDATE))+ scale_y_continuous(labels = function(x) format(x, scientific = FALSE))+ggtitle("WAUU trend")
 ```
 
 
-```{r}
+```{r youthchart}
 df_youth <- data_hist_orcl %>% filter(MODULE=='YOUTHv4')
 ggplot(df_youth, aes(x=HOURLY, y=TOTAL, group=TRANSDATE))+geom_line(aes(color=TRANSDATE)) + geom_point(aes(color=TRANSDATE))+ scale_y_continuous(labels = function(x) format(x, scientific = FALSE))+ggtitle("YOUTH trend")
 ```
 
 
-```{r}
+```{r bombasticochart}
 df_bombastico <- data_hist_orcl %>% filter(MODULE=='BOMBASTICO')
 ggplot(df_bombastico, aes(x=HOURLY, y=TOTAL, group=TRANSDATE))+geom_line(aes(color=TRANSDATE)) + geom_point(aes(color=TRANSDATE))+ scale_y_continuous(labels = function(x) format(x, scientific = FALSE))+ggtitle("Bombastico trend")
 ```
 
+```{r zerostresschart}
+df_zerostress <- df_zs %>% mutate(bundleprice=as.numeric(bundleprice),  HOURLY=format(ymd_hms(lastupdate), "%H")) %>% rename(TRANSDATE= transdate) %>% filter(TRANSDATE != yesterd) %>% group_by(TRANSDATE, HOURLY) %>% summarise(TOTAL=sum(bundleprice))
 
-```{r}
+
+ggplot(df_zerostress, aes(x=HOURLY, y=TOTAL, group=TRANSDATE))+geom_line(aes(color=TRANSDATE)) + geom_point(aes(color=TRANSDATE))+ scale_y_continuous(labels = function(x) format(x, scientific = FALSE))+ggtitle("ZeroStress trend")
+
+```
+
+
+
+```{r clear_result}
 #Clear resultset and close connections
-rm(df, df1)
 dbClearResult(dbListResults(myDB15)[[1]])
 dbClearResult(dbListResults(myDB39)[[1]])
 dbDisconnect(myDB15)
